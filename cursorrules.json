@@ -1,0 +1,253 @@
+{
+  "meta": {
+    "version": 1,
+    "owner": "DaveYerzh",
+    "project": "binance-futures-ml-bot",
+    "language": "ru",
+    "description": "ML-бот для торговли фьючерсами USDT-M на Binance, работающий в облаке. Модель обучается каждую ночь, в онлайне используется последняя сохраненная модель."
+  },
+  "rules": {
+    "general": [
+      "Всегда сначала читай и учитывай этот JSON как основную спецификацию проекта.",
+      "Не меняй общую структуру JSON (ключи верхнего уровня), только дополняй и обновляй значения внутри.",
+      "При добавлении новых модулей, сервисов, env-переменных или entrypoints обязательно синхронизируй раздел architecture и tasks.",
+      "Код пишется на Python 3.11+, без Jupyter-ноутбуков в production-коде.",
+      "Все зависимости должны быть задекларированы в файле requirements.txt."
+    ],
+    "safety": [
+      "Никогда не хардкоди API-ключи Binance или другие секреты в коде или репозитории.",
+      "Используй .env и пример .env.example для конфигурации.",
+      "Обязательно предусмотрей переменную среды TRADING_ENABLED (по умолчанию false). Если она false, бот только логирует сигналы и не отправляет ордера.",
+      "Поддерживай режим работы как с testnet, так и с реальным Binance Futures. Режим выбирается env-переменной BINANCE_ENV со значениями 'testnet' или 'mainnet'."
+    ],
+    "binance": [
+      "Торговля ведется на Binance USDT-M perpetual futures через официальный HTTP/WebSocket API.",
+      "Поддерживаемая базовая пара по умолчанию: BTCUSDT, затем можно расширить список.",
+      "Для реальных денег пользователь сам подставляет боевые ключи и BINANCE_ENV=mainnet в .env."
+    ],
+    "ml": [
+      "Модель ML для принятия решений LONG/SHORT/HOLD строится на основе градиентного бустинга (LightGBM) или совместимого алгоритма.",
+      "Обучение модели выполняется офлайн, отдельно от трейдингового цикла.",
+      "Онлайн-инференс должен быть быстрым (миллисекунды на один объект) и использовать заранее вычисленные фичи.",
+      "Фичи должны включать как минимум цену/объём по свечам, доходности, трендовые индикаторы и данные по open interest/funding, если это не усложняет реализацию."
+    ],
+    "cloud": [
+      "Проект должен быть готов к запуску на типичном Linux VPS (Ubuntu 22.04+) или в аналогичной среде.",
+      "Нужен Dockerfile и docker-compose.yml для развёртывания двух сервисов: trader и trainer.",
+      "Ночная переобучающая задача должна быть оформлена как отдельный entrypoint (trainer), который можно запускать по cron или через планировщик."
+    ]
+  },
+  "architecture": {
+    "stack": {
+      "language": "python",
+      "python_version": "3.11",
+      "package_manager": "pip",
+      "runtime_os": "linux",
+      "cloud_target": "generic_vps_or_cloud_vm"
+    },
+    "folders": [
+      "src/",
+      "src/binance_client/",
+      "src/data/",
+      "src/features/",
+      "src/models/",
+      "src/signals/",
+      "src/execution/",
+      "src/services/",
+      "deploy/",
+      "logs/",
+      "data/"
+    ],
+    "modules": [
+      {
+        "name": "config",
+        "path": "src/config.py",
+        "responsibility": "Чтение конфигурации и env-переменных (API ключи, режимы: testnet/mainnet, TRADING_ENABLED, список символов)."
+      },
+      {
+        "name": "binance_client",
+        "path": "src/binance_client/client.py",
+        "responsibility": "Обёртка над Binance Futures API (получение свечей, open interest, funding, отправка ордеров)."
+      },
+      {
+        "name": "data_storage",
+        "path": "src/data/storage.py",
+        "responsibility": "Сохранение и загрузка исторических данных (parquet/csv) для обучения."
+      },
+      {
+        "name": "feature_builder_offline",
+        "path": "src/features/feature_builder_offline.py",
+        "responsibility": "Построение фичей из исторических данных для офлайн-обучения."
+      },
+      {
+        "name": "feature_builder_runtime",
+        "path": "src/features/feature_builder_runtime.py",
+        "responsibility": "Инкрементальный расчёт фичей в онлайне при приходе новых свечей."
+      },
+      {
+        "name": "ml_train_offline",
+        "path": "src/models/train_offline.py",
+        "responsibility": "Первичное обучение модели ML и сохранение артефактов (модель, список фичей)."
+      },
+      {
+        "name": "ml_train_nightly",
+        "path": "src/models/train_nightly.py",
+        "responsibility": "Ежедневное ночное дообучение модели на обновлённых данных и обновление model_latest."
+      },
+      {
+        "name": "ml_inference",
+        "path": "src/models/inference.py",
+        "responsibility": "Загрузка последней модели и выдача решений LONG/SHORT/HOLD и confidence по фичам."
+      },
+      {
+        "name": "signal_store",
+        "path": "src/signals/signal_store.py",
+        "responsibility": "Хранение последних сигналов по каждому символу с таймстемпами и временем протухания."
+      },
+      {
+        "name": "execution_logic",
+        "path": "src/execution/executor.py",
+        "responsibility": "Применение сигналов к текущим позициям на Binance (открытие/закрытие/переворот), с учётом ограничений риска и TRADING_ENABLED."
+      },
+      {
+        "name": "position_manager",
+        "path": "src/execution/position_manager.py",
+        "responsibility": "Чтение и кеширование текущих позиций по фьючерсам с биржи."
+      },
+      {
+        "name": "trading_service",
+        "path": "src/services/trading_service.py",
+        "responsibility": "Основной бесконечный цикл: получение свечей, обновление фичей, вызов ml_inference, запись сигналов и вызов execution_logic."
+      },
+      {
+        "name": "deploy_docker",
+        "path": "deploy/Dockerfile",
+        "responsibility": "Сборка образа с кодом бота для запуска в облаке."
+      },
+      {
+        "name": "deploy_compose",
+        "path": "deploy/docker-compose.yml",
+        "responsibility": "Описание сервисов trader и trainer, монтирование volumes для data/logs и указание команд запуска."
+      }
+    ],
+    "entrypoints": {
+      "trader": "src/services/trading_service.py",
+      "trainer_nightly": "src/models/train_nightly.py",
+      "train_offline_once": "src/models/train_offline.py"
+    },
+    "env": {
+      "files": [
+        ".env",
+        ".env.example"
+      ],
+      "variables": [
+        {
+          "name": "BINANCE_API_KEY",
+          "required": true,
+          "description": "API key для Binance Futures. Пользователь сам решает, использовать ли testnet или mainnet."
+        },
+        {
+          "name": "BINANCE_API_SECRET",
+          "required": true,
+          "description": "Secret key для Binance Futures."
+        },
+        {
+          "name": "BINANCE_ENV",
+          "required": false,
+          "default": "testnet",
+          "allowed_values": [
+            "testnet",
+            "mainnet"
+          ],
+          "description": "Определяет, использовать ли testnet или реальный Binance Futures. Для реальных денег установить mainnet и указать боевые ключи."
+        },
+        {
+          "name": "TRADING_ENABLED",
+          "required": false,
+          "default": "false",
+          "description": "Если 'false', бот только логирует сигналы и не отправляет ордера. Для реальной торговли установить 'true' явно и осознанно."
+        },
+        {
+          "name": "SYMBOLS",
+          "required": false,
+          "default": "BTCUSDT",
+          "description": "Список символов через запятую для торговли (например BTCUSDT,ETHUSDT)."
+        }
+      ]
+    },
+    "scheduling": {
+      "nightly_training_time_utc": "02:05",
+      "description": "Тренерский entrypoint запускается по cron или через планировщик один раз в сутки, тренирует новую модель и обновляет model_latest."
+    }
+  },
+  "tasks": {
+    "phase1_initial_project": [
+      {
+        "id": "P1-01",
+        "status": "done",
+        "description": "Создать базовую структуру папок и файлов согласно architecture.folders и architecture.modules, добавить __init__.py где нужно."
+      },
+      {
+        "id": "P1-02",
+        "status": "done",
+        "description": "Настроить virtualenv, файл requirements.txt и базовый config.py с чтением .env."
+      },
+      {
+        "id": "P1-03",
+        "status": "done",
+        "description": "Создать .env.example с перечислением всех env-переменных из architecture.env.variables."
+      }
+    ],
+    "phase2_ml_and_data": [
+      {
+        "id": "P2-01",
+        "status": "todo",
+        "description": "Реализовать binance_client для исторических данных фьючерсов и сохранить в data_storage."
+      },
+      {
+        "id": "P2-02",
+        "status": "todo",
+        "description": "Реализовать feature_builder_offline и скрипт train_offline.py, который строит датасет, обучает первую модель и сохраняет model_latest."
+      },
+      {
+        "id": "P2-03",
+        "status": "todo",
+        "description": "Реализовать ml_inference так, чтобы он использовал model_latest и список фичей, и выдал решение LONG/SHORT/HOLD и confidence."
+      }
+    ],
+    "phase3_online_trading": [
+      {
+        "id": "P3-01",
+        "status": "todo",
+        "description": "Реализовать feature_builder_runtime для инкрементального расчёта фичей на основе входящих свечей фьючерсов."
+      },
+      {
+        "id": "P3-02",
+        "status": "todo",
+        "description": "Реализовать signal_store и execution_logic (executor + position_manager) с учётом TRADING_ENABLED и простых правил риска."
+      },
+      {
+        "id": "P3-03",
+        "status": "todo",
+        "description": "Реализовать trading_service.py как основной цикл, который читает данные с Binance (WebSocket или периодический REST), обновляет фичи, вызывает ml_inference и execution_logic."
+      }
+    ],
+    "phase4_cloud_and_nightly_training": [
+      {
+        "id": "P4-01",
+        "status": "todo",
+        "description": "Реализовать train_nightly.py для ежедневного переобучения модели и обновления model_latest с накопленными данными."
+      },
+      {
+        "id": "P4-02",
+        "status": "todo",
+        "description": "Добавить Dockerfile и docker-compose.yml с двумя сервисами: trader (основной бот) и trainer (разовый запуск обучения), а также описанием томов для data и logs."
+      },
+      {
+        "id": "P4-03",
+        "status": "todo",
+        "description": "Добавить README.md с инструкцией по запуску бота локально и в облаке, включая пример строки cron для запуска trainer_nightly в контейнере или на хосте."
+      }
+    ]
+  }
+}
